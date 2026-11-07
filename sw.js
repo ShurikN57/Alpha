@@ -3,8 +3,8 @@
 // - Précache tolérant : un fichier manquant ne bloque plus l'installation.
 // - Les requêtes portant le paramètre "__update" vont toujours au réseau
 //   (utilisées par la page pour détecter et appliquer les mises à jour).
-const CACHE='cats-v2';
-const CORE=['./','./index.html','./manifest.webmanifest','./icon-192.png','./icon-512.png','./avatar-alpha.png','./avatar-bebew.png'];
+const CACHE='cats-v3';
+const CORE=['./','./index.html','./app.js','./app.css','./lib/pdfjs/pdf.min.js','./lib/pdfjs/pdf.worker.min.js','./manifest.webmanifest','./icon-192.png','./icon-512.png','./avatar-alpha.png','./avatar-bebew.png'];
 const PDFS=[
 './pdf/CR_Echo_cardio_du_19-06-2024_-_SPIKE_Mme_KEIB_Aurelie.pdf','./pdf/KEIB_SPIKE_20240619142638538.pdf',
 './pdf/CR_Echo_cardio_du_04-09-2024_-_SPIKE_Mme_KEIB_Aurelie.pdf','./pdf/KEIB_SPIKE_20240904145948957.pdf',
