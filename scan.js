@@ -718,9 +718,52 @@ function fillFromLocal(f) {
   if (f.type) document.getElementById("ftype").value = f.type;
   if (f.mode) document.getElementById("fmode").value = f.mode;
 }
+/* Lien vers la page d'ajout / de modification du produit sur Open Pet Food Facts */
+function contributeUrl(code, host = "world.openpetfoodfacts.org", exists = false) {
+  return `https://${host}/cgi/product.pl?type=${exists ? "edit" : "add"}&code=${encodeURIComponent(code)}`;
+}
+let lastLookup = null; // { code, host, exists }
+function contributeLink(label = "🌍 Compléter sur Open Pet Food Facts") {
+  if (!lastLookup) return "";
+  return `<a class="btn full contriblink" href="${esc(contributeUrl(lastLookup.code, lastLookup.host, lastLookup.exists))}" target="_blank" rel="noopener">${label}</a>`;
+}
+/* Texte prêt à coller dans le formulaire Open Pet Food Facts */
+function foodValuesText(f) {
+  const rows = [
+    ["Humidité", f.humidity, "%"],
+    ["Protéines", f.protein, "%"],
+    ["Matières grasses", f.fat, "%"],
+    ["Cellulose brute", f.fiber, "%"],
+    ["Cendres brutes", f.ash, "%"],
+    ["Calcium", f.calcium, "%"],
+    ["Phosphore", f.phosphorus, "%"],
+    ["Oméga 3", f.omega3, "%"],
+    ["Oméga 6", f.omega6, "%"],
+    ["Taurine", f.taurine, ""],
+  ].filter((r) => r[1] !== null && r[1] !== undefined && r[1] !== "");
+  const kcal100 = f.kcal ? (f.mode === "g" ? f.kcal * 100 : f.portionWeight ? (f.kcal / f.portionWeight) * 100 : null) : null;
+  const lines = [`${f.name}${f.brand ? " — " + f.brand : ""}`, "Constituants analytiques : " + rows.map((r) => `${r[0]} ${r[1]}${r[2] && !String(r[1]).includes(r[2]) ? " " + r[2] : ""}`).join(", ")];
+  if (kcal100) lines.push(`Énergie : ${Math.round(kcal100)} kcal/100 g`);
+  if (f.portionWeight) lines.push(`Poids d’une portion : ${f.portionWeight} g`);
+  return lines.join("\n");
+}
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (e) {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    return ok;
+  }
+}
 function askLabelPhoto(prefix) {
   const st = document.getElementById("afStatus");
-  st.innerHTML = `${prefix}<br>Les constituants ne sont pas dans la base : prends l’étiquette en photo pour les lire.<button class="btn primary full" id="afLabelNow" style="margin-top:10px">🏷️ Photographier l’étiquette</button>`;
+  st.innerHTML = `${prefix}<br>Les constituants ne sont pas dans la base : prends l’étiquette en photo pour les lire.<button class="btn primary full" id="afLabelNow" style="margin-top:10px">🏷️ Photographier l’étiquette</button>${contributeLink()}<div class="note" style="margin-top:6px">Une fois l’aliment enregistré, tu pourras aussi copier ses valeurs depuis sa fiche pour compléter la base : tout le monde en profitera, et Cats le retrouvera automatiquement.</div>`;
   document.getElementById("afLabelNow").onclick = () => document.getElementById("afLabelFile").click();
 }
 async function fillFromBarcode(code) {
@@ -744,6 +787,7 @@ async function fillFromBarcode(code) {
     return;
   }
   const p = await lookupBarcode(code);
+  lastLookup = { code, host: p?._source || "world.openpetfoodfacts.org", exists: !!p };
   if (!p) return askLabelPhoto(`Produit ${esc(code)} introuvable dans Open Pet Food Facts.`);
   const source = p._source.includes("pet") ? "Open Pet Food Facts" : "Open Food Facts";
   const d = mapProduct(p);
@@ -766,6 +810,7 @@ async function fillFromBarcode(code) {
 function bindAutofill(current) {
   const st = document.getElementById("afStatus");
   afBarcode = current?.barcode || "";
+  lastLookup = null;
   if (!st) return;
   document.getElementById("afScan").onclick = async () => {
     try {

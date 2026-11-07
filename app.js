@@ -1,4 +1,4 @@
-const APP_VERSION = "1.6.3";
+const APP_VERSION = "1.6.4";
 const K = "cats_pwa_v1";
 const LEGACY_K = "alpha_pwa_v1";
 const alphaDefaults = {
@@ -1219,9 +1219,12 @@ function foodDetail(id) {
   const f = state.foods.find((x) => x.id === id);
   if (!f) return;
   modal(
-    `<div class="modalhead"><div><h2>${esc(f.name)}</h2><div class="muted">${esc(f.type || "Aliment")}${f.brand ? " · " + esc(f.brand) : ""}</div></div><button class="close" data-close>×</button></div><div class="metricgrid"><div class="metric"><div class="k">Énergie</div><div class="v" style="font-size:19px">${esc(foodEnergyLabel(f))}</div></div><div class="metric"><div class="k">Portion habituelle</div><div class="v" style="font-size:19px">${esc(f.usualPortion || "—")}</div></div></div><div class="sectiontitle">Constituants analytiques</div><div class="nutrigrid">${nutrient("Humidité", f.humidity)}${nutrient("Protéines", f.protein)}${nutrient("Matières grasses", f.fat)}${nutrient("Cellulose / fibres", f.fiber)}${nutrient("Cendres", f.ash)}${nutrient("Calcium", f.calcium)}${nutrient("Phosphore", f.phosphorus)}${nutrient("Oméga 3", f.omega3)}${nutrient("Oméga 6", f.omega6)}${nutrient("ENA / glucides", f.ena)}${nutrient("Taurine", f.taurine, "")}</div>${f.notes ? `<div class="sectiontitle">Notes</div><div class="note">${esc(f.notes)}</div>` : ""}<div class="seg" style="margin-top:16px"><button class="btn" id="editFood">Modifier</button><button class="btn danger" id="deleteFood">Supprimer</button></div>`,
+    `<div class="modalhead"><div><h2>${esc(f.name)}</h2><div class="muted">${esc(f.type || "Aliment")}${f.brand ? " · " + esc(f.brand) : ""}</div></div><button class="close" data-close>×</button></div><div class="metricgrid"><div class="metric"><div class="k">Énergie</div><div class="v" style="font-size:19px">${esc(foodEnergyLabel(f))}</div></div><div class="metric"><div class="k">Portion habituelle</div><div class="v" style="font-size:19px">${esc(f.usualPortion || "—")}</div></div></div><div class="sectiontitle">Constituants analytiques</div><div class="nutrigrid">${nutrient("Humidité", f.humidity)}${nutrient("Protéines", f.protein)}${nutrient("Matières grasses", f.fat)}${nutrient("Cellulose / fibres", f.fiber)}${nutrient("Cendres", f.ash)}${nutrient("Calcium", f.calcium)}${nutrient("Phosphore", f.phosphorus)}${nutrient("Oméga 3", f.omega3)}${nutrient("Oméga 6", f.omega6)}${nutrient("ENA / glucides", f.ena)}${nutrient("Taurine", f.taurine, "")}</div>${f.notes ? `<div class="sectiontitle">Notes</div><div class="note">${esc(f.notes)}</div>` : ""}${f.barcode ? `<div class="sectiontitle">Base Open Pet Food Facts</div><div class="note">Code-barres ${esc(f.barcode)}. Ajoute ou complète ce produit dans la base ouverte : copie les valeurs, puis colle-les dans le formulaire.</div><div class="seg" style="margin-top:8px"><button class="btn" id="copyFoodValues">📋 Copier les valeurs</button><a class="btn contriblink" style="margin:0" href="${esc(contributeUrl(f.barcode, "world.openpetfoodfacts.org", false))}" target="_blank" rel="noopener">🌍 Ouvrir la fiche</a></div>` : ""}<div class="seg" style="margin-top:16px"><button class="btn" id="editFood">Modifier</button><button class="btn danger" id="deleteFood">Supprimer</button></div>`,
   );
   document.getElementById("editFood").onclick = () => foodModal(f.id);
+  document.getElementById("copyFoodValues")?.addEventListener("click", async () => {
+    toast((await copyText(foodValuesText(f))) ? "Valeurs copiées : colle-les sur Open Pet Food Facts" : "Copie impossible");
+  });
   document.getElementById("deleteFood").onclick = () => {
     if (confirm("Supprimer cet aliment ?")) {
       state.foods = state.foods.filter((x) => x.id !== f.id);
