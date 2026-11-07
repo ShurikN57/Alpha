@@ -1,0 +1,12 @@
+name: Vérification des fichiers
+on:
+  push:
+  pull_request:
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 tools/check-files.py
+      - name: Syntaxe JavaScript
+        run: node --check app.js && node --check sw.js
