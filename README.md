@@ -9,7 +9,10 @@ Application web installable (iPhone : Safari → Partager → « Sur l'écran d'
 | `app.js` | Toute la logique (calendrier, CR, poids, FR, calories, sauvegarde, mises à jour) |
 | `app.css` | Styles |
 | `sw.js` | Service worker : hors-ligne + cache |
+| `scan.js` | Remplissage automatique d'un aliment (code-barres, photo d'étiquette, estimation kcal) |
 | `lib/pdfjs/` | Lecteur PDF intégré (fonctionne hors-ligne) |
+| `lib/zxing/` | Lecture de codes-barres |
+| `lib/tesseract/` | Lecture de texte sur photo (OCR, sur le téléphone) |
 | `pdf/` | Comptes rendus |
 | `tools/check-files.py` | Vérifie que tous les fichiers cités existent |
 

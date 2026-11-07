@@ -739,3 +739,72 @@ textarea {
 .pickrow:first-child {
   border-top: 0;
 }
+.autofill {
+  border: 1px dashed color-mix(in srgb, var(--accent) 55%, var(--line));
+  background: color-mix(in srgb, var(--accent) 7%, var(--panel));
+  border-radius: 16px;
+  padding: 12px;
+  margin-bottom: 14px;
+}
+.autofilltitle {
+  font-weight: 850;
+  margin-bottom: 9px;
+}
+.autofillgrid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.autofillgrid .btn {
+  padding: 9px 4px;
+  font-size: 14px;
+  line-height: 1.25;
+}
+.autofillgrid small {
+  color: var(--muted);
+  font-weight: 650;
+  font-size: 11px;
+}
+#afStatus:not(:empty) {
+  margin-top: 10px;
+}
+.autofilled {
+  outline: 2px solid var(--good);
+  outline-offset: 1px;
+}
+.linkbtn {
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font-weight: 800;
+  padding: 0 0 0 6px;
+  text-decoration: underline;
+}
+.scanoverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 96;
+  background: #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.scanoverlay video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.scanframe {
+  position: absolute;
+  width: 78%;
+  height: 28%;
+  border: 3px solid #fff;
+  border-radius: 18px;
+  box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.45);
+}
+.scanhint {
+  position: absolute;
+  bottom: calc(40px + env(safe-area-inset-bottom));
+  color: #fff;
+  font-weight: 800;
+}
