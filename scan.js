@@ -51,7 +51,8 @@ function portionFromQuantity(q) {
 /* ---------- Open (Pet) Food Facts ---------- */
 async function lookupBarcode(code) {
   const fields =
-    "code,product_name,product_name_fr,generic_name_fr,brands,quantity,product_quantity,serving_size,nutriments,categories_tags";
+    "code,product_name,product_name_fr,generic_name_fr,brands,quantity,product_quantity,serving_size,nutriments,categories_tags," +
+    "ingredients_text_fr,ingredients_text,image_ingredients_url,image_nutrition_url,image_packaging_url";
   for (const host of ["world.openpetfoodfacts.org", "world.openfoodfacts.org"]) {
     try {
       const r = await fetch(`https://${host}/api/v2/product/${encodeURIComponent(code)}.json?fields=${fields}`);
@@ -94,6 +95,12 @@ function mapProduct(p) {
   }
   out.kcal100 = kcal100;
   out.portion = portionFromQuantity(p.quantity) || portionFromQuantity(p.serving_size);
+  // Les « constituants analytiques » des aliments pour animaux sont souvent recopiés dans le texte des ingrédients
+  const ingr = [p.ingredients_text_fr, p.ingredients_text].filter(Boolean).join("\n"),
+    at = ingr.toLowerCase().search(/constituants|composants analytiques|analyse moyenne|analytical/);
+  const fromText = at >= 0 ? parseLabel(ingr.slice(at)) : {};
+  for (const [k, v] of Object.entries(fromText)) if ((out[k] === null || out[k] === undefined) && v !== null) out[k] = v;
+  out.images = [p.image_ingredients_url, p.image_nutrition_url, p.image_packaging_url].filter(Boolean);
   const cats = (p.categories_tags || []).join(" ");
   out.type = /dry|croquette|kibble/.test(cats)
     ? "Croquettes"
@@ -451,6 +458,10 @@ function applyFoodData(d, source) {
   const hum = d.humidity ?? toNum(document.getElementById("fhumidity").value);
   const wet = (hum !== null && hum > 40) || (portion !== null && portion <= 200 && d.type !== "Croquettes");
   if (portion) setField("fportion", portion);
+  if (wet && portion && d.type !== "Croquettes") {
+    document.getElementById("fmode").value = "portion";
+    if (!document.getElementById("fusual").value) setField("fusual", "1 portion");
+  }
   if (kcal100 !== null) {
     if (wet && portion) {
       document.getElementById("fmode").value = "portion";
@@ -479,11 +490,60 @@ function readComposition() {
     ena: g("fena"),
   };
 }
+let afBarcode = "";
+function hasComposition(d) {
+  return d && d.protein !== null && d.protein !== undefined && d.fat !== null && d.fat !== undefined;
+}
+/* Produit déjà enregistré dans Cats (l'un ou l'autre chat) avec ce code-barres */
+function findLocalFood(code) {
+  for (const [catId, cat] of Object.entries(rootState.cats || {}))
+    for (const f of cat.foods || []) {
+      const bc = f.barcode || (String(f.notes || "").match(/Code-barres\s*:\s*(\d{8,14})/) || [])[1];
+      if (bc === code) return { food: f, cat: cat.profile?.nickname || catId };
+    }
+  return null;
+}
+function fillFromLocal(f) {
+  const map = {
+    fname: f.name,
+    fbrand: f.brand,
+    fkcal: f.kcal,
+    fportion: f.portionWeight,
+    fusual: f.usualPortion,
+    fhumidity: f.humidity,
+    fprotein: f.protein,
+    ffat: f.fat,
+    ffiber: f.fiber,
+    fash: f.ash,
+    fcalcium: f.calcium,
+    fphosphorus: f.phosphorus,
+    fomega3: f.omega3,
+    fomega6: f.omega6,
+    fena: f.ena,
+    ftaurine: f.taurine,
+  };
+  for (const [id, v] of Object.entries(map)) setField(id, v);
+  if (f.type) document.getElementById("ftype").value = f.type;
+  if (f.mode) document.getElementById("fmode").value = f.mode;
+}
+function askLabelPhoto(prefix) {
+  const st = document.getElementById("afStatus");
+  st.innerHTML = `${prefix}<br>Les constituants ne sont pas dans la base : prends l’étiquette en photo pour les lire.<button class="btn primary full" id="afLabelNow" style="margin-top:10px">🏷️ Photographier l’étiquette</button>`;
+  document.getElementById("afLabelNow").onclick = () => document.getElementById("afLabelFile").click();
+}
 async function fillFromBarcode(code) {
   const st = document.getElementById("afStatus");
   code = String(code || "").replace(/\D/g, "");
   if (code.length < 8) {
     st.textContent = "Code-barres invalide.";
+    return;
+  }
+  afBarcode = code;
+  setField("fnotes", `Code-barres : ${code}`, { overwrite: false });
+  const local = findLocalFood(code);
+  if (local) {
+    fillFromLocal(local.food);
+    st.innerHTML = `✅ Produit déjà enregistré dans Cats (${esc(local.cat)}) : toutes tes valeurs ont été reprises.`;
     return;
   }
   st.textContent = `🔎 Recherche du produit ${code}…`;
@@ -492,17 +552,28 @@ async function fillFromBarcode(code) {
     return;
   }
   const p = await lookupBarcode(code);
-  if (!p) {
-    st.innerHTML = `Produit ${esc(code)} introuvable dans Open Pet Food Facts. Essaie « 🏷️ Photo de l’étiquette » pour lire les constituants.`;
-    setField("fnotes", `Code-barres : ${code}`, { overwrite: false });
-    return;
-  }
+  if (!p) return askLabelPhoto(`Produit ${esc(code)} introuvable dans Open Pet Food Facts.`);
+  const source = p._source.includes("pet") ? "Open Pet Food Facts" : "Open Food Facts";
   const d = mapProduct(p);
-  applyFoodData(d, p._source.includes("pet") ? "Open Pet Food Facts" : "Open Food Facts");
-  setField("fnotes", `Code-barres : ${code}`, { overwrite: false });
+  applyFoodData(d, source);
+  if (hasComposition(d)) return;
+  // Pas de constituants : on essaie de lire les photos de l'emballage déjà présentes sur la fiche
+  for (const url of d.images) {
+    st.textContent = "📷 Lecture des photos de la fiche produit…";
+    try {
+      const ocr = parseLabel(await ocrImage(url, (pct) => (st.textContent = `📷 Lecture des photos de la fiche produit… ${pct} %`)));
+      if (hasComposition(ocr)) {
+        ocr.portion = ocr.portion ?? d.portion;
+        applyFoodData(ocr, `${source} (photo de la fiche)`);
+        return;
+      }
+    } catch (e) {}
+  }
+  askLabelPhoto(`✅ ${esc(source)} : ${esc([d.name && "nom", d.brand && "marque", d.portion && "portion"].filter(Boolean).join(", ") || "produit trouvé")}.`);
 }
-function bindAutofill() {
+function bindAutofill(current) {
   const st = document.getElementById("afStatus");
+  afBarcode = current?.barcode || "";
   if (!st) return;
   document.getElementById("afScan").onclick = async () => {
     try {

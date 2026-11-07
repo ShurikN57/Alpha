@@ -1,4 +1,4 @@
-const APP_VERSION = "1.6.1";
+const APP_VERSION = "1.6.2";
 const K = "cats_pwa_v1";
 const LEGACY_K = "alpha_pwa_v1";
 const alphaDefaults = {
@@ -1240,7 +1240,7 @@ function foodModal(editId = "") {
   );
   ftype.value = v("type", "Autre");
   fmode.value = v("mode", "g");
-  bindAutofill();
+  bindAutofill(current);
   const num = (id) => {
     const x = document.getElementById(id).value;
     return x === "" ? null : +x;
@@ -1270,6 +1270,7 @@ function foodModal(editId = "") {
       ena: num("fena"),
       taurine: ftaurine.value.trim(),
       notes: fnotes.value.trim(),
+      barcode: afBarcode || current?.barcode || (fnotes.value.match(/Code-barres\s*:\s*(\d{8,14})/) || [])[1] || "",
     };
     if (current) {
       Object.assign(current, food);
