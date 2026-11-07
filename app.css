@@ -808,3 +808,20 @@ textarea {
   color: #fff;
   font-weight: 800;
 }
+.scanactions {
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  bottom: calc(24px + env(safe-area-inset-bottom));
+  display: grid;
+  grid-template-columns: 1.4fr 1fr;
+  gap: 10px;
+}
+.scanoverlay .scanhint {
+  bottom: auto;
+  top: calc(74px + env(safe-area-inset-top));
+  left: 16px;
+  right: 76px;
+  text-align: center;
+  text-shadow: 0 1px 4px #000;
+}

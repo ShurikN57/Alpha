@@ -162,16 +162,26 @@ function parseLabel(raw) {
 }
 
 /* ---------- Scanner de code-barres ---------- */
-let zxingReader = null;
+// Boucle maison : caméra en haute résolution, analyse de la seule zone du cadre,
+// deux méthodes de binarisation, plusieurs échelles. Boutons de secours dans l'écran.
+let scanSession = null;
 function stopScanner() {
-  try {
-    zxingReader?.reset();
-  } catch (e) {}
-  zxingReader = null;
+  if (scanSession) {
+    scanSession.stopped = true;
+    clearTimeout(scanSession.timer);
+    scanSession.stream?.getTracks().forEach((t) => t.stop());
+    scanSession = null;
+  }
   document.getElementById("scanOverlay")?.remove();
 }
-async function scanBarcode() {
-  await loadScript("lib/zxing/zxing.min.js");
+function eanValid(code) {
+  if (!/^\d{8}$|^\d{12,13}$/.test(code)) return false;
+  const d = code.padStart(code.length === 8 ? 8 : 13, "0").split("").map(Number),
+    check = d.pop();
+  const sum = d.reverse().reduce((s, x, i) => s + x * (i % 2 === 0 ? 3 : 1), 0);
+  return (10 - (sum % 10)) % 10 === check;
+}
+function eanReader() {
   const hints = new Map();
   hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
     ZXing.BarcodeFormat.EAN_13,
@@ -180,62 +190,205 @@ async function scanBarcode() {
     ZXing.BarcodeFormat.UPC_E,
   ]);
   hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
-  return new Promise((resolve, reject) => {
-    const ov = document.createElement("div");
-    ov.id = "scanOverlay";
-    ov.className = "scanoverlay";
-    ov.innerHTML = `<video id="scanVideo" playsinline muted autoplay></video><div class="scanframe"></div><div class="scanhint">Vise le code-barres</div><button class="pdfclose" id="scanClose" aria-label="Fermer">×</button>`;
-    document.body.appendChild(ov);
-    document.getElementById("scanClose").onclick = () => {
+  const reader = new ZXing.MultiFormatReader();
+  reader.setHints(hints);
+  return reader;
+}
+/* Netteté + contraste pour les images floues : niveaux de gris, étirement
+   de l'histogramme, puis masque flou (unsharp) horizontal + vertical. */
+function enhanceCanvas(src, amount = 1.6) {
+  const w = src.width,
+    h = src.height,
+    g = src.getContext("2d", { willReadFrequently: true }),
+    im = g.getImageData(0, 0, w, h),
+    d = im.data,
+    y = new Float32Array(w * h);
+  let lo = 255,
+    hi = 0;
+  for (let i = 0, j = 0; j < y.length; i += 4, j++) {
+    const v = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    y[j] = v;
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+  }
+  const span = Math.max(1, hi - lo),
+    r = 2,
+    blur = new Float32Array(w * h),
+    tmp = new Float32Array(w * h);
+  for (let row = 0; row < h; row++)
+    for (let x = 0; x < w; x++) {
+      let s = 0,
+        n = 0;
+      for (let k = -r; k <= r; k++) {
+        const xx = x + k;
+        if (xx >= 0 && xx < w) {
+          s += y[row * w + xx];
+          n++;
+        }
+      }
+      tmp[row * w + x] = s / n;
+    }
+  for (let row = 0; row < h; row++)
+    for (let x = 0; x < w; x++) {
+      let s = 0,
+        n = 0;
+      for (let k = -1; k <= 1; k++) {
+        const rr = row + k;
+        if (rr >= 0 && rr < h) {
+          s += tmp[rr * w + x];
+          n++;
+        }
+      }
+      blur[row * w + x] = s / n;
+    }
+  const out = document.createElement("canvas");
+  out.width = w;
+  out.height = h;
+  const og = out.getContext("2d"),
+    oim = og.createImageData(w, h),
+    od = oim.data;
+  for (let j = 0, i = 0; j < y.length; j++, i += 4) {
+    let v = ((y[j] + amount * (y[j] - blur[j]) - lo) / span) * 255;
+    v = v < 0 ? 0 : v > 255 ? 255 : v;
+    od[i] = od[i + 1] = od[i + 2] = v;
+    od[i + 3] = 255;
+  }
+  og.putImageData(oim, 0, 0);
+  return out;
+}
+function decodeCanvas(reader, c, binarizers = [ZXing.HybridBinarizer, ZXing.GlobalHistogramBinarizer], enhance = true) {
+  const tryOne = (cv) => {
+    const lum = new ZXing.HTMLCanvasElementLuminanceSource(cv);
+    for (const Bin of binarizers) {
+      try {
+        return reader.decode(new ZXing.BinaryBitmap(new Bin(lum))).getText();
+      } catch (e) {}
+    }
+    return null;
+  };
+  return tryOne(c) || (enhance ? tryOne(enhanceCanvas(c)) || tryOne(enhanceCanvas(c, 3)) : null);
+}
+/* Résout avec : un code (texte), "photo", "type" ou null (fermé). */
+async function scanBarcode() {
+  await loadScript("lib/zxing/zxing.min.js");
+  const reader = eanReader();
+  const ov = document.createElement("div");
+  ov.id = "scanOverlay";
+  ov.className = "scanoverlay";
+  ov.innerHTML = `<video id="scanVideo" playsinline muted autoplay></video><div class="scanframe"></div><div class="scanhint" id="scanHint">Place le code-barres dans le cadre, à environ 15–20 cm</div><div class="scanactions"><button class="btn" id="scanPhoto">📸 Prendre une photo</button><button class="btn" id="scanType">🔢 Saisir</button></div><button class="pdfclose" id="scanClose" aria-label="Fermer">×</button>`;
+  document.body.appendChild(ov);
+  const video = document.getElementById("scanVideo");
+  return new Promise(async (resolve, reject) => {
+    const session = (scanSession = { stopped: false });
+    const finish = (v) => {
       stopScanner();
-      resolve(null);
+      resolve(v);
     };
-    zxingReader = new ZXing.BrowserMultiFormatReader(hints);
-    zxingReader
-      .decodeFromConstraints(
-        { video: { facingMode: { ideal: "environment" } } },
-        document.getElementById("scanVideo"),
-        (result) => {
-          if (result) {
-            navigator.vibrate?.(60);
-            stopScanner();
-            resolve(result.getText());
-          }
+    document.getElementById("scanClose").onclick = () => finish(null);
+    document.getElementById("scanType").onclick = () => finish("type");
+    document.getElementById("scanPhoto").onclick = () => {
+      document.getElementById("afBarFile")?.click(); // dans le geste de l'utilisateur (exigence iOS)
+      finish("photo");
+    };
+    try {
+      session.stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+          advanced: [{ focusMode: "continuous" }],
         },
-      )
-      .catch((e) => {
-        stopScanner();
-        reject(e);
       });
+    } catch (e) {
+      stopScanner();
+      return reject(e);
+    }
+    if (session.stopped) return session.stream.getTracks().forEach((t) => t.stop());
+    const track = session.stream.getVideoTracks()[0];
+    try {
+      const cap = track.getCapabilities?.() || {};
+      const adv = {};
+      if (cap.focusMode?.includes?.("continuous")) adv.focusMode = "continuous";
+      if (cap.zoom && cap.zoom.max >= 1.5) adv.zoom = Math.min(cap.zoom.max, 2);
+      if (Object.keys(adv).length) await track.applyConstraints({ advanced: [adv] });
+    } catch (e) {}
+    video.srcObject = session.stream;
+    try {
+      await video.play();
+    } catch (e) {}
+    const c = document.createElement("canvas"),
+      g = c.getContext("2d", { willReadFrequently: true });
+    const started = Date.now();
+    let n = 0;
+    const tick = () => {
+      if (session.stopped) return;
+      const vw = video.videoWidth,
+        vh = video.videoHeight;
+      if (vw && vh) {
+        // zone centrale (le cadre fait ~78 % × 28 % de l'écran ; on prend large)
+        const sw = vw * 0.9,
+          sh = vh * 0.5,
+          sx = (vw - sw) / 2,
+          sy = (vh - sh) / 2;
+        const sizes = n % 2 === 0 ? [1280] : [800];
+        for (const maxW of sizes) {
+          const scale = Math.min(1, maxW / sw);
+          c.width = Math.round(sw * scale);
+          c.height = Math.round(sh * scale);
+          g.drawImage(video, sx, sy, sw, sh, 0, 0, c.width, c.height);
+          const code = decodeCanvas(reader, c);
+          if (code && eanValid(code)) {
+            navigator.vibrate?.(60);
+            return finish(code);
+          }
+        }
+        n++;
+        if (Date.now() - started > 7000) {
+          const h = document.getElementById("scanHint");
+          if (h && !h.dataset.slow) {
+            h.dataset.slow = "1";
+            h.textContent = "Difficile ? Recule un peu (20 cm), ou utilise « Prendre une photo ».";
+            document.getElementById("scanPhoto").classList.add("primary");
+          }
+        }
+      }
+      session.timer = setTimeout(tick, 80);
+    };
+    tick();
   });
 }
-async function decodeBarcodeFromFile(file) {
+/* Repli : lire les chiffres imprimés sous le code-barres (OCR), validés par la clé de contrôle */
+function findEanInText(text) {
+  for (const line of String(text).split(/\n/)) {
+    const digits = line.replace(/[oO]/g, "0").replace(/[^\d]/g, "");
+    for (const len of [13, 8, 12])
+      for (let i = 0; i + len <= digits.length; i++) {
+        const cand = digits.slice(i, i + len);
+        if (eanValid(cand)) return cand;
+      }
+  }
+  return null;
+}
+async function decodeBarcodeFromFile(file, onStatus) {
   await loadScript("lib/zxing/zxing.min.js");
   const url = URL.createObjectURL(file);
   try {
     const img = new Image();
     img.src = url;
     await img.decode();
-    const hints = new Map();
-    hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
-    const reader = new ZXing.MultiFormatReader();
-    reader.setHints(hints);
+    const reader = eanReader();
+    const W = img.naturalWidth,
+      H = img.naturalHeight;
     const attempt = (sx, sy, sw, sh, maxW) => {
-      const scale = Math.min(1, maxW / sw);
-      const c = document.createElement("canvas");
+      const scale = Math.min(1, maxW / sw),
+        c = document.createElement("canvas");
       c.width = Math.round(sw * scale);
       c.height = Math.round(sh * scale);
       c.getContext("2d").drawImage(img, sx, sy, sw, sh, 0, 0, c.width, c.height);
-      const lum = new ZXing.HTMLCanvasElementLuminanceSource(c);
-      for (const Bin of [ZXing.HybridBinarizer, ZXing.GlobalHistogramBinarizer]) {
-        try {
-          return reader.decode(new ZXing.BinaryBitmap(new Bin(lum))).getText();
-        } catch (e) {}
-      }
-      return null;
+      const r = decodeCanvas(reader, c);
+      return r && eanValid(r) ? r : null;
     };
-    const W = img.naturalWidth,
-      H = img.naturalHeight;
     // image entière à plusieurs tailles, puis bandes horizontales qui se chevauchent
     for (const maxW of [1600, 1000, 640]) {
       const r = attempt(0, 0, W, H, maxW);
@@ -245,10 +398,14 @@ async function decodeBarcodeFromFile(file) {
       const r = attempt(0, Math.round((H * i) / 8), W, Math.round(H / 4), 1200);
       if (r) return r;
     }
-    throw new Error("illisible");
   } finally {
     URL.revokeObjectURL(url);
   }
+  // dernier recours : lire les chiffres sous les barres
+  onStatus && onStatus("Barres illisibles, lecture des chiffres sous le code…");
+  const code = findEanInText(await ocrImage(file));
+  if (code) return code;
+  throw new Error("illisible");
 }
 
 /* ---------- Intégration au formulaire « Ajouter un aliment » ---------- */
@@ -351,7 +508,8 @@ function bindAutofill() {
     try {
       if (!navigator.mediaDevices?.getUserMedia) throw new Error("caméra indisponible");
       const code = await scanBarcode();
-      if (code) await fillFromBarcode(code);
+      if (code === "type") return document.getElementById("afCode").click();
+      if (code && code !== "photo") await fillFromBarcode(code);
     } catch (e) {
       st.textContent = "Caméra indisponible ou refusée : prends plutôt une photo du code-barres.";
       document.getElementById("afBarFile").click();
@@ -363,9 +521,9 @@ function bindAutofill() {
     if (!f) return;
     st.textContent = "Lecture du code-barres…";
     try {
-      await fillFromBarcode(await decodeBarcodeFromFile(f));
+      await fillFromBarcode(await decodeBarcodeFromFile(f, (m) => (st.textContent = m)));
     } catch (err) {
-      st.textContent = "Code-barres illisible sur la photo. Réessaie de plus près, ou saisis le code.";
+      st.textContent = "Code-barres illisible sur la photo. Reprends-la bien nette (touche l’écran pour faire la mise au point), ou saisis le code.";
     }
   };
   document.getElementById("afCode").onclick = async () => {
