@@ -115,56 +115,231 @@ function mapProduct(p) {
 }
 
 /* ---------- Lecture d'étiquette (OCR) ---------- */
-async function ocrImage(file, onProgress) {
-  await loadScript("lib/tesseract/tesseract.min.js");
-  const worker = await Tesseract.createWorker("fra", 1, {
-    workerPath: "lib/tesseract/worker.min.js",
-    corePath: "lib/tesseract/tesseract-core-lstm.wasm.js",
-    langPath: "lib/tesseract/lang",
-    workerBlobURL: false,
-    logger: (m) => onProgress && m.status === "recognizing text" && onProgress(Math.round(m.progress * 100)),
-  });
+/* Image → canvas préparé : rotation, niveaux de gris, contraste étiré, taille adaptée */
+async function loadImageSource(src) {
+  const img = new Image();
+  img.crossOrigin = "anonymous";
+  const url = typeof src === "string" ? src : URL.createObjectURL(src);
   try {
-    const { data } = await worker.recognize(file);
-    return data.text || "";
+    img.src = url;
+    await img.decode();
   } finally {
-    worker.terminate();
+    if (typeof src !== "string") setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  return img;
+}
+function prepCanvas(img, deg = 0, target = 2200, gray = true) {
+  const W = img.naturalWidth || img.width,
+    H = img.naturalHeight || img.height,
+    scale = Math.min(2.5, target / Math.max(W, H)),
+    w = Math.round(W * scale),
+    h = Math.round(H * scale),
+    swap = deg === 90 || deg === 270,
+    c = document.createElement("canvas");
+  c.width = swap ? h : w;
+  c.height = swap ? w : h;
+  const g = c.getContext("2d", { willReadFrequently: true });
+  g.translate(c.width / 2, c.height / 2);
+  g.rotate((deg * Math.PI) / 180);
+  g.drawImage(img, -w / 2, -h / 2, w, h);
+  if (gray) {
+    const im = g.getImageData(0, 0, c.width, c.height),
+      d = im.data,
+      hist = new Uint32Array(256);
+    for (let i = 0; i < d.length; i += 4) {
+      const v = (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]) | 0;
+      d[i] = v;
+      hist[v]++;
+    }
+    // étirement du contraste en ignorant 1 % des extrêmes (reflets, ombres)
+    const n = d.length / 4;
+    let lo = 0,
+      hi = 255,
+      acc = 0;
+    while (lo < 255 && (acc += hist[lo]) < n * 0.01) lo++;
+    acc = 0;
+    while (hi > 0 && (acc += hist[hi]) < n * 0.01) hi--;
+    const span = Math.max(1, hi - lo);
+    for (let i = 0; i < d.length; i += 4) {
+      const v = Math.max(0, Math.min(255, ((d[i] - lo) / span) * 255));
+      d[i] = d[i + 1] = d[i + 2] = v;
+    }
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.putImageData(im, 0, 0);
+  }
+  return c;
+}
+let ocrWorkerPromise = null;
+function getOcrWorker(onProgress) {
+  ocrProgress = onProgress;
+  if (!ocrWorkerPromise)
+    ocrWorkerPromise = loadScript("lib/tesseract/tesseract.min.js").then(() =>
+      Tesseract.createWorker("fra", 1, {
+        workerPath: "lib/tesseract/worker.min.js",
+        corePath: "lib/tesseract/tesseract-core-lstm.wasm.js",
+        langPath: "lib/tesseract/lang",
+        workerBlobURL: false,
+        logger: (m) => ocrProgress && m.status === "recognizing text" && ocrProgress(Math.round(m.progress * 100)),
+      }),
+    ).catch((e) => {
+      ocrWorkerPromise = null;
+      throw e;
+    });
+  return ocrWorkerPromise;
+}
+let ocrProgress = null;
+/* Texte brut d'une image (une orientation) */
+async function ocrImage(src, onProgress) {
+  const worker = await getOcrWorker(onProgress);
+  const img = await loadImageSource(src);
+  const { data } = await worker.recognize(prepCanvas(img));
+  return data.text || "";
+}
+/* Seuillage adaptatif (moyenne locale) : sépare le texte d'un fond brillant ou irrégulier */
+function adaptiveThreshold(c, k = 0.88) {
+  const g = c.getContext("2d", { willReadFrequently: true }),
+    W = c.width,
+    H = c.height,
+    im = g.getImageData(0, 0, W, H),
+    d = im.data,
+    I = new Uint32Array((W + 1) * (H + 1)),
+    r = Math.max(8, Math.round(W / 40));
+  for (let y = 0; y < H; y++) {
+    let row = 0;
+    for (let x = 0; x < W; x++) {
+      row += d[(y * W + x) * 4];
+      I[(y + 1) * (W + 1) + x + 1] = I[y * (W + 1) + x + 1] + row;
+    }
+  }
+  for (let y = 0; y < H; y++) {
+    const y0 = Math.max(0, y - r),
+      y1 = Math.min(H, y + r);
+    for (let x = 0; x < W; x++) {
+      const x0 = Math.max(0, x - r),
+        x1 = Math.min(W, x + r),
+        sum = I[y1 * (W + 1) + x1] - I[y0 * (W + 1) + x1] - I[y1 * (W + 1) + x0] + I[y0 * (W + 1) + x0],
+        i = (y * W + x) * 4,
+        v = d[i] < (sum / ((x1 - x0) * (y1 - y0))) * k ? 0 : 255;
+      d[i] = d[i + 1] = d[i + 2] = v;
+    }
+  }
+  g.putImageData(im, 0, 0);
+  return c;
+}
+/* Plausibilité d'une valeur selon le type d'aliment (humide si humidité > 50 %) */
+function plausible(k, v, humidity) {
+  if (v === null || v === undefined) return false;
+  if (humidity === null || humidity === undefined) return true;
+  const wet = humidity > 50,
+    lim = wet ? { protein: 25, fat: 18, fiber: 4, ash: 6, calcium: 1.5, phosphorus: 1.2 } : { protein: 75, fat: 45, fiber: 15, ash: 13, calcium: 4, phosphorus: 3 };
+  return lim[k] === undefined || v <= lim[k];
+}
+function sanitizeLabel(d) {
+  const h = d.humidity;
+  for (const k of ["protein", "fat", "fiber", "ash", "calcium", "phosphorus"]) if (d[k] !== undefined && d[k] !== null && !plausible(k, d[k], h)) d[k] = null;
+  const sum = ["protein", "fat", "fiber", "ash", "humidity"].reduce((s, k) => s + (+d[k] || 0), 0);
+  if (sum > 101) d.ash = null; // incohérent : la valeur la plus souvent mal lue
+  return d;
+}
+const LABEL_KEYS = ["protein", "fat", "fiber", "ash", "humidity", "kcal100", "calcium", "phosphorus", "taurine", "portion", "omega3", "omega6"];
+/* Lecture d'étiquette : 1) trouve le bon sens, 2) relit avec d'autres réglages et fusionne,
+   jusqu'à avoir protéines, matières grasses, cellulose, cendres et humidité. */
+async function ocrLabel(src, onProgress) {
+  const worker = await getOcrWorker();
+  const img = await loadImageSource(src);
+  const merged = {};
+  const merge = (pl) => {
+    const h = merged.humidity ?? pl.humidity;
+    for (const k of LABEL_KEYS)
+      if ((merged[k] === null || merged[k] === undefined) && pl[k] !== null && pl[k] !== undefined && plausible(k, pl[k], h)) merged[k] = pl[k];
+    sanitizeLabel(merged);
+  };
+  const complete = () => ["protein", "fat", "fiber", "ash", "humidity"].every((k) => merged[k] !== null && merged[k] !== undefined);
+  const run = async (canvas, psm, phase) => {
+    await worker.setParameters({ tessedit_pageseg_mode: psm });
+    ocrProgress = (pct) => onProgress && onProgress(pct, phase);
+    const { data } = await worker.recognize(canvas);
+    return data.text || "";
+  };
+  try {
+    let best = { score: -1, deg: 0 };
+    const angles = [0, 90, 270, 180];
+    for (let i = 0; i < angles.length; i++) {
+      const text = await run(prepCanvas(img, angles[i], 1800), "3", i ? `recherche du sens ${i + 1}/4` : "");
+      const pl = parseLabel(text),
+        sc = labelScore(pl, text);
+      if (sc > best.score) best = { score: sc, deg: angles[i] };
+      if (sc > 0) merge(pl);
+      if (sc >= 3) break;
+    }
+    const variants = [
+      [() => adaptiveThreshold(prepCanvas(img, best.deg, 2600)), "3"],
+      [() => prepCanvas(img, best.deg, 2600), "4"],
+      [() => adaptiveThreshold(prepCanvas(img, best.deg, 2600)), "11"],
+      [() => adaptiveThreshold(prepCanvas(img, best.deg, 2600), 0.8), "6"],
+    ];
+    for (let i = 0; i < variants.length && !complete(); i++) merge(parseLabel(await run(variants[i][0](), variants[i][1], `lecture détaillée ${i + 1}/${variants.length}`)));
+    return { data: merged, score: best.score };
+  } finally {
+    worker.setParameters({ tessedit_pageseg_mode: "3" }).catch(() => {});
   }
 }
-function parseLabel(raw) {
-  const t = String(raw)
-    .replace(/\s+/g, " ")
-    .replace(/(\d) ?, ?(\d)/g, "$1.$2")
+function labelScore(parsed, text) {
+  const found = ["protein", "fat", "fiber", "ash", "humidity", "kcal100"].filter((k) => parsed[k] !== null && parsed[k] !== undefined).length;
+  const words = (noAccents(text).match(/constituant|proteine|grasse|cendre|cellulose|humidite|energie|kcal/g) || []).length;
+  return found * 2 + Math.min(words, 6) * 0.5;
+}
+const noAccents = (x) =>
+  String(x)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase();
+/* Analyse tolérante du texte (accents ignorés, mots partiels, erreurs d'OCR courantes) */
+function parseLabel(raw) {
+  const t = noAccents(raw)
+    .replace(/[ \t]+/g, " ")
+    .replace(/(\d) ?[,.] ?(\d)/g, "$1.$2")
+    .replace(/(\d)\s*o\b/g, "$10"); // « 8o » → 80
   const val = "(\\d+(?:\\.\\d+)?)";
-  const grab = (re) => {
-    const m = t.match(re);
-    return m ? toNum(m[1]) : null;
+  const fix = (s) => {
+    if (s === null) return null;
+    // « 04 % » lu sans la virgule → 0.4
+    return /^0\d+$/.test(s) ? parseFloat("0." + s.slice(1)) : parseFloat(s);
+  };
+  const grab = (key, min, max, gap = 28) => {
+    const re = new RegExp(`(?:${key})[^0-9\\n]{0,${gap}}?${val}`, "g");
+    let m;
+    while ((m = re.exec(t))) {
+      const v = fix(m[1]);
+      if (v !== null && v >= min && v <= max) return v;
+    }
+    return null;
   };
   const out = {
-    protein: grab(new RegExp(`prot[ée]i?ne?s?(?: brutes?)?\\s*[:.\\-]?\\s*${val}\\s*%?`)),
-    fat: grab(
-      new RegExp(
-        `(?:teneur en )?(?:mati[èe]res? grasses?|graisses?|lipides?)(?: brutes?)?(?: totales)?\\s*[:.\\-]?\\s*${val}`,
-      ),
-    ),
-    fiber: grab(new RegExp(`(?:cellulose|fibres?)(?: brutes?| alimentaires?)?\\s*[:.\\-]?\\s*${val}`)),
-    ash: grab(new RegExp(`(?:cendres?|mati[èe]res? (?:min[ée]rales|inorganiques))(?: brutes?)?\\s*[:.\\-]?\\s*${val}`)),
-    humidity: grab(new RegExp(`humidit[ée]\\s*[:.\\-]?\\s*${val}`)),
-    calcium: grab(new RegExp(`calcium\\s*[:.\\-]?\\s*${val}\\s*%`)),
-    phosphorus: grab(new RegExp(`phosphore\\s*[:.\\-]?\\s*${val}\\s*%`)),
-    omega3: grab(new RegExp(`om[ée]ga[ -]?3\\s*[:.\\-]?\\s*${val}`)),
-    omega6: grab(new RegExp(`om[ée]ga[ -]?6\\s*[:.\\-]?\\s*${val}`)),
+    protein: grab("prot[a-z]*", 0.5, 75),
+    fat: grab("grass?[a-z]*|graiss[a-z]*|lipid[a-z]*|fat\\b", 0.1, 45),
+    fiber: grab("cellul[a-z]*|ellulo[a-z]*|fibr[a-z]*", 0, 20),
+    ash: grab("cendr[a-z]*|endres|\\bdres\\b|matieres? minerales?|matiere inorganique", 0, 20),
+    humidity: grab("humid[a-z]*|umidit[a-z]*|midite|nidite|moisture", 1, 90, 18),
+    calcium: grab("calci[a-z]*", 0, 5, 18),
+    phosphorus: grab("phosph[a-z]*|hosph[a-z]*", 0, 5, 18),
+    omega3: grab("omega[ -]?3", 0, 10, 12),
+    omega6: grab("omega[ -]?6", 0, 15, 12),
   };
-  const tau = t.match(new RegExp(`taurine\\s*[:.\\-]?\\s*${val}\\s*mg`));
+  const tau = t.match(new RegExp(`taurine\\s*(?:\\([^)]*\\))?[^0-9\\n]{0,6}${val}\\s*mg`));
   if (tau) out.taurine = tau[1] + " mg/kg";
-  let m = t.match(new RegExp(`${val}\\s*kcal\\s*(?:\\/|par|pour)?\\s*(100 ?g|kg)`));
+  let m = t.match(new RegExp(`${val}\\s*k?cal\\w*\\s*(?:\\/|par|pour)?\\s*(100 ?g|kg)`));
   if (m) out.kcal100 = m[2] === "kg" ? toNum(m[1]) / 10 : toNum(m[1]);
   else {
     m = t.match(new RegExp(`${val}\\s*kj\\s*(?:\\/|par|pour)?\\s*(100 ?g|kg)`));
     if (m) out.kcal100 = (m[2] === "kg" ? toNum(m[1]) / 10 : toNum(m[1])) / 4.184;
   }
-  out.portion = portionFromQuantity(t);
+  if (out.kcal100 !== undefined && !(out.kcal100 > 20 && out.kcal100 < 600)) delete out.kcal100;
+  // poids d'une portion : « poids net 85 g », « 4 x 57 g », « (85g/jour) », sinon « 85 g » isolé (pas « /100g »)
+  const pn = t.match(/poids net[^0-9\n]{0,15}(?:\d+\s*[x×]\s*)?(\d+(?:\.\d+)?)\s*g\b/);
+  const mult = t.match(/(\d+)\s*[x×]\s*(\d+(?:\.\d+)?)\s*g\b/);
+  const single = [...t.matchAll(/(^|[^\/\d.])(\d{2,3})\s*g\b/g)].map((x) => +x[2]).find((g) => g >= 20 && g <= 200);
+  out.portion = pn ? +pn[1] : mult ? +mult[2] : single || null;
   return out;
 }
 
@@ -350,6 +525,24 @@ async function scanBarcode() {
             return finish(code);
           }
         }
+        if (n % 3 === 2) {
+          // code-barres tenu à la verticale
+          const sw2 = vw * 0.5,
+            sh2 = vh * 0.9;
+          const scale = Math.min(1, 1000 / sh2);
+          c.width = Math.round(sh2 * scale);
+          c.height = Math.round(sw2 * scale);
+          g.save();
+          g.translate(c.width / 2, c.height / 2);
+          g.rotate(-Math.PI / 2);
+          g.drawImage(video, (vw - sw2) / 2, (vh - sh2) / 2, sw2, sh2, -c.height / 2, -c.width / 2, c.height, c.width);
+          g.restore();
+          const code = decodeCanvas(reader, c);
+          if (code && eanValid(code)) {
+            navigator.vibrate?.(60);
+            return finish(code);
+          }
+        }
         n++;
         if (Date.now() - started > 7000) {
           const h = document.getElementById("scanHint");
@@ -379,39 +572,38 @@ function findEanInText(text) {
 }
 async function decodeBarcodeFromFile(file, onStatus) {
   await loadScript("lib/zxing/zxing.min.js");
-  const url = URL.createObjectURL(file);
-  try {
-    const img = new Image();
-    img.src = url;
-    await img.decode();
-    const reader = eanReader();
-    const W = img.naturalWidth,
-      H = img.naturalHeight;
-    const attempt = (sx, sy, sw, sh, maxW) => {
-      const scale = Math.min(1, maxW / sw),
-        c = document.createElement("canvas");
-      c.width = Math.round(sw * scale);
-      c.height = Math.round(sh * scale);
-      c.getContext("2d").drawImage(img, sx, sy, sw, sh, 0, 0, c.width, c.height);
-      const r = decodeCanvas(reader, c);
-      return r && eanValid(r) ? r : null;
-    };
-    // image entière à plusieurs tailles, puis bandes horizontales qui se chevauchent
-    for (const maxW of [1600, 1000, 640]) {
-      const r = attempt(0, 0, W, H, maxW);
+  const img = await loadImageSource(file);
+  const reader = eanReader();
+  const tryC = (c) => {
+    const r = decodeCanvas(reader, c);
+    return r && eanValid(r) ? r : null;
+  };
+  // 4 sens × plusieurs tailles, puis bandes qui se chevauchent dans chaque sens
+  for (const deg of [0, 90, 270, 180])
+    for (const size of [1600, 1000]) {
+      const r = tryC(prepCanvas(img, deg, size, false));
       if (r) return r;
     }
+  for (const deg of [0, 90]) {
+    const c = prepCanvas(img, deg, 1600, false);
     for (let i = 0; i < 7; i++) {
-      const r = attempt(0, Math.round((H * i) / 8), W, Math.round(H / 4), 1200);
+      const band = document.createElement("canvas"),
+        h = Math.round(c.height / 4);
+      band.width = c.width;
+      band.height = h;
+      band.getContext("2d").drawImage(c, 0, Math.round((c.height * i) / 8), c.width, h, 0, 0, c.width, h);
+      const r = tryC(band);
       if (r) return r;
     }
-  } finally {
-    URL.revokeObjectURL(url);
   }
   // dernier recours : lire les chiffres sous les barres
   onStatus && onStatus("Barres illisibles, lecture des chiffres sous le code…");
-  const code = findEanInText(await ocrImage(file));
-  if (code) return code;
+  for (const deg of [0, 90, 270]) {
+    const worker = await getOcrWorker();
+    const { data } = await worker.recognize(prepCanvas(img, deg));
+    const code = findEanInText(data.text || "");
+    if (code) return code;
+  }
   throw new Error("illisible");
 }
 
@@ -561,7 +753,7 @@ async function fillFromBarcode(code) {
   for (const url of d.images) {
     st.textContent = "📷 Lecture des photos de la fiche produit…";
     try {
-      const ocr = parseLabel(await ocrImage(url, (pct) => (st.textContent = `📷 Lecture des photos de la fiche produit… ${pct} %`)));
+      const ocr = (await ocrLabel(url, (pct) => (st.textContent = `📷 Lecture des photos de la fiche produit… ${pct} %`))).data;
       if (hasComposition(ocr)) {
         ocr.portion = ocr.portion ?? d.portion;
         applyFoodData(ocr, `${source} (photo de la fiche)`);
@@ -608,8 +800,9 @@ function bindAutofill(current) {
     if (!f) return;
     st.textContent = "🏷️ Lecture de l’étiquette… (la première fois, quelques secondes de chargement)";
     try {
-      const text = await ocrImage(f, (pct) => (st.textContent = `🏷️ Lecture de l’étiquette… ${pct} %`));
-      const d = parseLabel(text);
+      const d = (
+        await ocrLabel(f, (pct, phase) => (st.textContent = `🏷️ Lecture de l’étiquette${phase ? " — " + phase : ""}… ${pct} %`))
+      ).data;
       const n = applyFoodData(d, "Étiquette");
       if (!n) st.innerHTML += "<br>Astuce : photo nette, bien éclairée, cadrée sur « Constituants analytiques ».";
     } catch (err) {

@@ -1,4 +1,4 @@
-const APP_VERSION = "1.6.2";
+const APP_VERSION = "1.6.3";
 const K = "cats_pwa_v1";
 const LEGACY_K = "alpha_pwa_v1";
 const alphaDefaults = {
