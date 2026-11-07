@@ -24,8 +24,10 @@ self.addEventListener('fetch',e=>{
   if(req.method!=='GET')return;
   const url=new URL(req.url);
   if(url.searchParams.has('__update'))return; // toujours réseau
-  e.respondWith(caches.match(req).then(r=>r||fetch(req).then(resp=>{
-    if(resp.ok||resp.type==='opaque'){const copy=resp.clone();caches.open(CACHE).then(c=>c.put(req,copy))}
+  // app.js?b=… / app.css?b=… : même entrée de cache que app.js / app.css
+  const key=url.origin===location.origin&&url.searchParams.has('b')?url.origin+url.pathname:req;
+  e.respondWith(caches.match(key).then(r=>r||fetch(req).then(resp=>{
+    if(resp.ok||resp.type==='opaque'){const copy=resp.clone();caches.open(CACHE).then(c=>c.put(key,copy))}
     return resp;
   }).catch(()=>req.mode==='navigate'?caches.match('./index.html'):Response.error())));
 });

@@ -1,4 +1,4 @@
-const APP_VERSION = "1.5.0";
+const APP_VERSION = "1.5.1";
 const K = "cats_pwa_v1";
 const LEGACY_K = "alpha_pwa_v1";
 const alphaDefaults = {
@@ -1487,7 +1487,7 @@ function closeModal() {
 document.getElementById("appearanceBtn").onclick = () => {
   const def = state.profile.defaultAccent || "#2563eb";
   modal(
-    `<div class="modalhead"><h2>Apparence — ${esc(state.profile.nickname)}</h2><button class="close" data-close>×</button></div><div class="appearance-grid"><button class="btn ${state.settings.theme === "light" ? "primary" : ""}" data-themebtn="light">☀️ Clair</button><button class="btn ${state.settings.theme === "dark" ? "primary" : ""}" data-themebtn="dark">🌙 Sombre</button></div><div class="sectiontitle">Couleur</div><div class="appearance-grid"><button class="btn" id="defaultColor">Couleur par défaut</button><input class="colorpick" id="accentPicker" type="color" value="${state.settings.accent}"></div><div class="sectiontitle">Sauvegarde Cats</div><div class="seg"><button class="btn" id="exportJson">Exporter JSON</button><button class="btn" id="importJson">Importer JSON</button></div><input id="jsonFile" type="file" accept="application/json" class="hidden"><div class="note" style="margin-top:12px">La sauvegarde JSON complète contient les données des deux chats, les réglages et les PDF ajoutés depuis l’iPhone. Les PDF préchargés dans l’application restent déjà fournis avec Cats.</div>`,
+    `<div class="modalhead"><h2>Apparence — ${esc(state.profile.nickname)}</h2><button class="close" data-close>×</button></div><div class="appearance-grid"><button class="btn ${state.settings.theme === "light" ? "primary" : ""}" data-themebtn="light">☀️ Clair</button><button class="btn ${state.settings.theme === "dark" ? "primary" : ""}" data-themebtn="dark">🌙 Sombre</button></div><div class="sectiontitle">Couleur</div><div class="appearance-grid"><button class="btn" id="defaultColor">Couleur par défaut</button><input class="colorpick" id="accentPicker" type="color" value="${state.settings.accent}"></div><div class="sectiontitle">Sauvegarde Cats</div><div class="seg"><button class="btn" id="exportJson">Exporter JSON</button><button class="btn" id="importJson">Importer JSON</button></div><input id="jsonFile" type="file" accept="application/json" class="hidden"><div class="note" style="margin-top:12px">La sauvegarde JSON complète contient les données des deux chats, les réglages et les PDF ajoutés depuis l’iPhone. Les PDF préchargés dans l’application restent déjà fournis avec Cats.</div><div class="sectiontitle">Application</div><div class="row" style="justify-content:space-between"><span class="muted">Version <strong>${APP_VERSION}</strong></span><button class="btn" id="checkUpdate">Rechercher une mise à jour</button></div>`,
   );
   document.querySelectorAll("[data-themebtn]").forEach(
     (b) =>
@@ -1522,6 +1522,15 @@ document.getElementById("appearanceBtn").onclick = () => {
       exportJson.disabled = false;
       exportJson.textContent = "Exporter JSON";
     }
+  };
+  checkUpdate.onclick = async () => {
+    checkUpdate.disabled = true;
+    checkUpdate.textContent = "Recherche…";
+    const found = await checkForUpdate(true);
+    checkUpdate.disabled = false;
+    checkUpdate.textContent = "Rechercher une mise à jour";
+    if (found) closeModal();
+    else toast(navigator.onLine ? "Tu as déjà la dernière version" : "Pas de connexion internet");
   };
   importJson.onclick = () => jsonFile.click();
   jsonFile.onchange = async () => {
@@ -1579,16 +1588,21 @@ async function readRunningIndex() {
   return runningIndex;
 }
 async function checkForUpdate(force = false) {
-  if (updateShown || !navigator.onLine) return;
-  if (!force && Date.now() - lastUpdateCheck < 60000) return;
+  if (updateShown) return true;
+  if (!navigator.onLine) return false;
+  if (!force && Date.now() - lastUpdateCheck < 60000) return false;
   lastUpdateCheck = Date.now();
   try {
     const reg = await navigator.serviceWorker?.getRegistration();
     reg?.update().catch(() => {});
     const current = await readRunningIndex();
     const latest = await fetchLatest();
-    if (current && latest && latest !== current) showUpdateBanner();
+    if (current && latest && latest !== current) {
+      showUpdateBanner();
+      return true;
+    }
   } catch (e) {}
+  return updateShown;
 }
 async function applyUpdate(btn) {
   if (btn) {
@@ -1612,6 +1626,9 @@ async function applyUpdate(btn) {
         }
       }
     }
+  } catch (e) {}
+  try {
+    localStorage.setItem("cats_build", String(Date.now()));
   } catch (e) {}
   location.reload();
 }
